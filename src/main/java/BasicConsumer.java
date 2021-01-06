@@ -1,62 +1,80 @@
+import kafka.utils.ShutdownableThread;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
-public class BasicConsumer implements Runnable {
-    private final KafkaConsumer<String, String> consumer;
-    private final List<String> topics;
-    private final int id;
+public class BasicConsumer extends ShutdownableThread {
+    private final KafkaConsumer<Integer, String> consumer;
+    private final String topic;
+    private final String groupId;
+    private final int numMessageToConsume;
+    private int messageRemaining;
+    private final CountDownLatch latch;
 
-    public BasicConsumer(int id, String groupId, List<String> topics) {
-        this.id = id;
-        this.topics = topics;
+    public BasicConsumer(final String topic,
+                    final String groupId,
+                    final Optional<String> instanceId,
+                    final boolean readCommitted,
+                    final int numMessageToConsume,
+                    final CountDownLatch latch) {
+        super("KafkaConsumerExample", false);
+        this.groupId = groupId;
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KafkaProperties.KAFKA_SERVER_URL + ":" + KafkaProperties.KAFKA_SERVER_PORT);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        instanceId.ifPresent(id -> props.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, id));
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, "1000");
+        props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "30000");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.IntegerDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        if (readCommitted) {
+            props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
+        }
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
-        Properties settings = new Properties();
-        settings.put("bootstrap.servers", "localhost:9092");
-        settings.put("group.id", groupId);
-        settings.put("auto.commit.interval.ms", 5000);
-        settings.put("auto.offset.reset", "earliest");
-        settings.put("key.deserializer", StringDeserializer.class.getName());
-        settings.put("value.deserializer", StringDeserializer.class.getName());
+        consumer = new KafkaConsumer<>(props);
+        this.topic = topic;
+        this.numMessageToConsume = numMessageToConsume;
+        this.messageRemaining = numMessageToConsume;
+        this.latch = latch;
+    }
 
-        this.consumer = new KafkaConsumer<String, String>(settings);
+    KafkaConsumer<Integer, String> get() {
+        return consumer;
     }
 
     @Override
-    public void run() {
-        try {
-            consumer.subscribe(topics);
-
-            while (true) {
-                ConsumerRecords<String, String> records = consumer.poll(Long.MAX_VALUE);
-                for(ConsumerRecord<String, String> record: records) {
-                    Map<String, Object> data = new HashMap<>();
-                    data.put("partition", record.partition());
-                    data.put("offset", record.offset());
-                    data.put("value", record.value());
-                    System.out.println(this.id + ": " + data);
-
-                }
-            }
-        } catch (WakeupException e) {
-
-        } finally {
-            consumer.close();
+    public void doWork() {
+        consumer.subscribe(Collections.singletonList(this.topic));
+        ConsumerRecords<Integer, String> records = consumer.poll(Duration.ofSeconds(1));
+        for (ConsumerRecord<Integer, String> record : records) {
+            System.out.println(groupId + " received message : from partition " + record.partition() + ", (" + record.key() + ", " + record.value() + ") at offset " + record.offset());
+        }
+        messageRemaining -= records.count();
+        if (messageRemaining <= 0) {
+            System.out.println(groupId + " finished reading " + numMessageToConsume + " messages");
+            latch.countDown();
         }
     }
 
-    public void shutdown() {
-        consumer.wakeup();
+    @Override
+    public String name() {
+        return null;
     }
 
-    public static void main(String[] args) {
-
+    @Override
+    public boolean isInterruptible() {
+        return false;
     }
 }
